@@ -1,58 +1,27 @@
 package cc.xuloo.akka;
 
 import akka.actor.*;
-import akka.pattern.PatternsCS;
+import akka.japi.pf.DeciderBuilder;
 import scala.concurrent.duration.Duration;
 
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+
+import static akka.actor.SupervisorStrategy.*;
 
 public class ActorSupervisionExample {
 
     public static void main(String[] args) throws Exception {
         ActorSystem system = ActorSystem.create("FlightBookingSystem");
 
-//        stopWithStop(system);
-//        stopWithPoisonPill(system);
-//        stopWithKill(system);
-        stopWithGracefulStop(system);
-    }
+        ActorRef supervisor = system.actorOf(Supervisor.props(), "supervisor");
 
-    public static void stopWithStop(ActorSystem system) {
-        ActorRef theActor = system.actorOf(Props.create(Supervisor.class, Supervisor::new));
+        supervisor.tell(new UsualException(), ActorRef.noSender());
+        supervisor.tell(new CustomException(), ActorRef.noSender());
+        supervisor.tell(new CrazyException(), ActorRef.noSender());
 
-        theActor.tell(new TheMessage(), ActorRef.noSender());
-        system.stop(theActor);
-    }
+        supervisor = system.actorOf(Supervisor.props(), "supervisor");
 
-    public static void stopWithPoisonPill(ActorSystem system) {
-        ActorRef theActor = system.actorOf(Props.create(Supervisor.class, Supervisor::new));
-
-        theActor.tell(new TheMessage(), ActorRef.noSender());
-        theActor.tell(PoisonPill.getInstance(), ActorRef.noSender());
-    }
-
-    public static void stopWithKill(ActorSystem system) {
-        ActorRef theActor = system.actorOf(Props.create(Supervisor.class, Supervisor::new));
-
-        theActor.tell(new TheMessage(), ActorRef.noSender());
-        theActor.tell(Kill.getInstance(), ActorRef.noSender());
-    }
-
-    public static void stopWithGracefulStop(ActorSystem system) {
-        ActorRef theActor = system.actorOf(Props.create(Supervisor.class, Supervisor::new));
-
-        theActor.tell(new TheMessage(), ActorRef.noSender());
-
-        try {
-            CompletionStage<Boolean> stopped = PatternsCS.gracefulStop(theActor, Duration.create(5, TimeUnit.SECONDS), PoisonPill.getInstance());
-            stopped.toCompletableFuture().get(6, TimeUnit.SECONDS);
-            // the actor has been stopped
-        } catch (InterruptedException | ExecutionException | TimeoutException e) {
-            // the actor wasn't stopped within 5 seconds
-        }
+        supervisor.tell(new UsualException(), ActorRef.noSender());
     }
 
     public static class Supervisor extends AbstractActor {
@@ -61,17 +30,22 @@ public class ActorSupervisionExample {
             return Props.create(Supervisor.class, Supervisor::new);
         }
 
-        private ActorRef listener;
-
-        private int acks;
-
         private ActorRef a;
 
         private ActorRef b;
 
         @Override
+        public SupervisorStrategy supervisorStrategy() {
+            return new AllForOneStrategy(10, Duration.create(1, TimeUnit.MINUTES), DeciderBuilder.
+                    match(UsualException.class, e -> resume()).
+                    match(CustomException.class, e -> restart()).
+                    match(CrazyException.class, e -> stop()).
+                    matchAny(o -> escalate()).build());
+
+        }
+
+        @Override
         public void preStart() {
-            acks = 0;
             a = getContext().actorOf(McCauleyCulkin.props("First Child"));
             b = getContext().actorOf(McCauleyCulkin.props("Second Child"));
         }
@@ -84,23 +58,7 @@ public class ActorSupervisionExample {
         @Override
         public Receive createReceive() {
             return receiveBuilder()
-                    .match(TheMessage.class, msg -> {
-                        System.out.println("Supervisor received a message");
-
-                        listener = getSender();
-
-                        a.tell(msg, getSelf());
-                        b.tell(msg, getSelf());
-                    })
-                    .match(TheAck.class, msg -> {
-                        System.out.println("Supervisor received an Ack");
-
-                        if (++acks == 2) {
-                            System.out.println("Supervisor received all Acks");
-
-                            listener.tell(new TheAck(), getSelf());
-                        }
-                    })
+                    .match(Exception.class, msg -> a.tell(msg, getSelf()))
                     .build();
         }
     }
@@ -121,6 +79,11 @@ public class ActorSupervisionExample {
         }
 
         @Override
+        public void preStart() {
+            System.out.println(key + " Started");
+        }
+
+        @Override
         public void postStop() {
             System.out.println(key + " Stopped");
         }
@@ -128,16 +91,18 @@ public class ActorSupervisionExample {
         @Override
         public Receive createReceive() {
             return receiveBuilder()
-                    .match(TheMessage.class, msg -> {
-                        System.out.println(key + " received a message");
-
-                        getSender().tell(new TheAck(), getSelf());
+                    .match(Exception.class, msg -> {
+                        throw msg;
                     })
                     .build();
         }
     }
 
-    public static class TheMessage {}
+    public static class UsualException extends Exception {}
 
-    public static class TheAck {}
+    public static class CustomException extends Exception {}
+
+    public static class CrazyException extends Exception {}
+
+    public static class FatalExeption extends Exception {}
 }
